@@ -1,0 +1,24 @@
+services:
+  bot:
+    build: .
+    environment:
+      - TELEGRAM_BOT_TOKEN=7804718619:AAFRAcxtqADshEDKHxkGT4u_ArhyIWJ6nsA
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/telegram_bot
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=secret
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: telegram_bot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

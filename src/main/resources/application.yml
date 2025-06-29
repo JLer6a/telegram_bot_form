@@ -1,0 +1,14 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5433/telegram_bot
+    username: postgres
+    password: secret
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+telegram:
+  bot:
+    token: "7804718619:AAFRAcxtqADshEDKHxkGT4u_ArhyIWJ6nsA"
+    username: "CatNetVpnBot"

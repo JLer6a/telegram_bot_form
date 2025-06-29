@@ -1,0 +1,392 @@
+
+
+// ======= src\main\java\com\example\demo\DemoApplication.java =======
+
+package com.example.demo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableAsync;
+
+@SpringBootApplication
+@EnableAsync
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+}
+
+
+// ======= src\main\java\com\example\demo\config\BotConfig.java =======
+
+package com.example.demo.config;
+
+import com.example.demo.service.FormBotService;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.telegram.telegrambots.meta.TelegramBotsApi;
+import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
+import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
+
+@Configuration
+public class BotConfig {
+
+    @Bean
+    public TelegramBotsApi telegramBotsApi(FormBotService formBotService) throws TelegramApiException {
+        TelegramBotsApi botsApi = new TelegramBotsApi(DefaultBotSession.class);
+        botsApi.registerBot(formBotService);
+        return botsApi;
+    }
+}
+
+
+// ======= src\main\java\com\example\demo\model\FormStep.java =======
+
+package com.example.demo.model;
+
+public enum FormStep {
+    NONE, NAME, EMAIL, SCORE
+}
+
+
+// ======= src\main\java\com\example\demo\model\UserResponse.java =======
+
+package com.example.demo.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+@Entity
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class UserResponse {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private Long telegramUserId;
+    private String name;
+    private String email;
+    private Integer score;
+}
+
+
+// ======= src\main\java\com\example\demo\model\UserState.java =======
+
+package com.example.demo.model;
+
+import lombok.*;
+
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class UserState {
+    private FormStep step = FormStep.NONE;
+    private String name;
+    private String email;
+}
+
+
+// ======= src\main\java\com\example\demo\repository\UserResponseRepository.java =======
+
+package com.example.demo.repository;
+
+import com.example.demo.model.UserResponse;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface UserResponseRepository extends JpaRepository<UserResponse, Long> {
+}
+
+
+// ======= src\main\java\com\example\demo\service\FormBotService.java =======
+
+package com.example.demo.service;
+
+import com.example.demo.model.*;
+import com.example.demo.repository.UserResponseRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+import org.telegram.telegrambots.bots.TelegramLongPollingBot;
+import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
+import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.objects.InputFile;
+import org.telegram.telegrambots.meta.api.objects.Message;
+import org.telegram.telegrambots.meta.api.objects.Update;
+
+import java.io.ByteArrayInputStream;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class FormBotService extends TelegramLongPollingBot {
+
+    private final UserResponseRepository repository;
+    private final ReportService reportService;
+
+    private final Map<Long, UserState> userStates = new ConcurrentHashMap<>();
+
+    @Value("${telegram.bot.username}")
+    private String botUsername;
+
+    @Value("${telegram.bot.token}")
+    private String botToken;
+
+    @Override
+    public void onUpdateReceived(Update update) {
+        if (!update.hasMessage() || !update.getMessage().hasText()) return;
+
+        Message message = update.getMessage();
+        String text = message.getText();
+        Long userId = message.getFrom().getId();
+        Long chatId = message.getChatId();
+
+        if (text.equals("/start")) {
+            userStates.remove(userId);
+            sendMessage(chatId, "Привет! Используйте команду /form, чтобы пройти опрос.");
+            return;
+        }
+
+        if (text.equals("/form")) {
+            UserState state = new UserState();
+            state.setStep(FormStep.NAME);
+            userStates.put(userId, state);
+            sendMessage(chatId, "Введите ваше имя:");
+            return;
+        }
+
+        if (text.equals("/report")) {
+            userStates.remove(userId);
+            sendMessage(chatId, "⏳ Генерирую отчет...");
+
+            try {
+                reportService.generateReport().thenAccept(bytes -> {
+                    InputFile file = new InputFile(new ByteArrayInputStream(bytes), "report.docx");
+                    SendDocument doc = new SendDocument();
+                    doc.setChatId(chatId.toString());
+                    doc.setDocument(file);
+                    try {
+                        execute(doc); // здесь все еще можно, т.к. мы внутри самого бота
+                    } catch (Exception e) {
+                        log.error("Ошибка при отправке отчета", e);
+                        sendMessage(chatId, "❌ Ошибка при отправке отчета.");
+                    }
+                });
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+
+            return;
+        }
+
+        handleFormInput(userId, chatId, text);
+    }
+
+    private void handleFormInput(Long userId, Long chatId, String text) {
+        if (text.equalsIgnoreCase("/exit") || text.equalsIgnoreCase("выход")) {
+            userStates.remove(userId);
+            sendMessage(chatId, "Вы вышли из формы. Для нового начала введите /form.");
+            return;
+        }
+
+        UserState state = userStates.get(userId);
+        if (state == null) {
+            sendMessage(chatId, "Введите /form чтобы начать опрос.");
+            return;
+        }
+
+        switch (state.getStep()) {
+            case NAME -> {
+                state.setName(text);
+                state.setStep(FormStep.EMAIL);
+                sendMessage(chatId, "Введите email:");
+            }
+            case EMAIL -> {
+                if (!text.matches("^[A-Za-z0-9+_.-]+@(.+)$")) {
+                    sendMessage(chatId, "Некорректный email. Попробуйте снова:");
+                    return;
+                }
+                state.setEmail(text);
+                state.setStep(FormStep.SCORE);
+                sendMessage(chatId, "Оцените наш сервис от 1 до 10:");
+            }
+            case SCORE -> {
+                try {
+                    int score = Integer.parseInt(text);
+                    if (score < 1 || score > 10) {
+                        sendMessage(chatId, "Оценка должна быть от 1 до 10. Введите снова:");
+                        return;
+                    }
+
+                    UserResponse response = UserResponse.builder()
+                            .telegramUserId(userId)
+                            .name(state.getName())
+                            .email(state.getEmail())
+                            .score(score)
+                            .build();
+                    repository.save(response);
+
+                    userStates.remove(userId);
+                    sendMessage(chatId, "Спасибо! Ваши данные сохранены.");
+                } catch (NumberFormatException e) {
+                    sendMessage(chatId, "Введите число от 1 до 10.");
+                }
+            }
+        }
+    }
+
+    public void sendMessage(Long chatId, String text) {
+        SendMessage msg = new SendMessage();
+        msg.setChatId(chatId.toString());
+        msg.setText(text);
+        try {
+            execute(msg);
+        } catch (Exception e) {
+            log.error("Ошибка при отправке сообщения", e);
+        }
+    }
+
+    @Override
+    public String getBotUsername() {
+        return botUsername;
+    }
+
+    @Override
+    public String getBotToken() {
+        return botToken;
+    }
+}
+
+
+// ======= src\main\java\com\example\demo\service\ReportService.java =======
+
+package com.example.demo.service;
+
+import com.example.demo.model.UserResponse;
+import com.example.demo.repository.UserResponseRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.poi.xwpf.usermodel.*;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
+import org.telegram.telegrambots.meta.api.objects.InputFile;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class ReportService {
+
+    private final UserResponseRepository repository;
+
+    @Async
+    public CompletableFuture<byte[]> generateReport() throws Exception {
+        List<UserResponse> responses = repository.findAll();
+        byte[] bytes = generateDocx(responses);
+        return CompletableFuture.completedFuture(bytes);
+    }
+
+    private byte[] generateDocx(List<UserResponse> responses) throws Exception {
+        try (XWPFDocument doc = new XWPFDocument(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+
+            XWPFParagraph title = doc.createParagraph();
+            title.setAlignment(ParagraphAlignment.CENTER);
+            XWPFRun run = title.createRun();
+            run.setText("Результаты опроса");
+            run.setBold(true);
+            run.setFontSize(16);
+
+            XWPFTable table = doc.createTable();
+
+            // Заголовок
+            XWPFTableRow header = table.getRow(0);
+            header.getCell(0).setText("Имя");
+            header.addNewTableCell().setText("Email");
+            header.addNewTableCell().setText("Оценка");
+
+            // Данные
+            for (UserResponse r : responses) {
+                XWPFTableRow row = table.createRow();
+                row.getCell(0).setText(r.getName());
+                row.getCell(1).setText(r.getEmail());
+                row.getCell(2).setText(String.valueOf(r.getScore()));
+            }
+
+            doc.write(out);
+            return out.toByteArray();
+        }
+    }
+}
+
+
+// ======= src\main\resources\application.yml =======
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5433/telegram_bot
+    username: postgres
+    password: secret
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+telegram:
+  bot:
+    token: "7804718619:AAFRAcxtqADshEDKHxkGT4u_ArhyIWJ6nsA"
+    username: "CatNetVpnBot"
+
+
+// ======= src\test\java\com\example\demo\DemoApplicationTests.java =======
+
+package com.example.demo;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+class DemoApplicationTests {
+
+    @Test
+    void contextLoads() {
+    }
+}
+
+
+// ======= docker-compose.yml =======
+
+services:
+  bot:
+    build: .
+    environment:
+      - TELEGRAM_BOT_TOKEN=7804718619:AAFRAcxtqADshEDKHxkGT4u_ArhyIWJ6nsA
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/telegram_bot
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=secret
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: telegram_bot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
